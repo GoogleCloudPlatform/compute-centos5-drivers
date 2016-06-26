@@ -1,12 +1,12 @@
 # Define the kmod package name here.
-%define kmod_name cifs
+%define kmod_name virtio_scsi
 
 # If kversion isn't defined on the rpmbuild line, define it here.
-%{!?kversion: %define kversion 2.6.18-8.el5}
+%{!?kversion: %define kversion 2.6.18-164.el5}
 
 Name:    %{kmod_name}-kmod
-Version: 1.45
-Release: 1%{?dist}
+Version: 1.2
+Release: 1
 Group:   System Environment/Kernel
 License: GPLv2
 Summary: %{kmod_name} kernel module(s)
@@ -25,12 +25,9 @@ Source10: kmodtool-%{kmod_name}-el5.sh
 %ifarch i686
 %define paevar PAE
 %endif
-%ifarch i686 x86_64
-%define xenvar xen
-%endif
 
 # If kvariants isn't defined on the rpmbuild line, build all variants for this architecture.
-%{!?kvariants: %define kvariants %{?basevar} %{?xenvar} %{?paevar}}
+%{!?kvariants: %define kvariants %{?basevar} %{?paevar}}
 
 # Magic hidden here.
 %{expand:%(sh %{SOURCE10} rpmtemplate_kmp %{kmod_name} %{kversion} %{kvariants})}
@@ -77,6 +74,10 @@ find %{buildroot} -type f -name \*.ko -exec %{__chmod} u+x \{\} \;
 %{__rm} -rf %{buildroot}
 
 %changelog
+* Thu Jul 14 2016 Mike Waychison <mikew@google.com> - 1.2
+- Updated to use DID_RESET for SCSI failure modes not yet supported in RHEL5.
+* Sat Jun 25 2016 Mike Waychison <mikew@google.com> - 1.1
+- Initial release of the virtio_scsi driver backport for RHEL5.
 * Wed Jan 05 2011 Alan Bartlett <ajb@elrepo.org> - 1.45
 - Revised this specification file.
 

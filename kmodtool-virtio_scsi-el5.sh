@@ -28,7 +28,7 @@ shopt -s extglob
 
 myprog="kmodtool"
 myver="0.10.10_kmp3"
-knownvariants=@(BOOT|PAE|@(big|huge)mem|debug|enterprise|kdump|?(large)smp|uml|xen[0U]?(-PAE)|xen)
+knownvariants=@(BOOT|PAE|@(big|huge)mem|debug|enterprise|kdump|?(large)smp|uml)
 kmod_name=
 kver=
 verrel=
@@ -63,15 +63,17 @@ print_variant ()
 
 get_rpmtemplate ()
 {
-    local variant="${1}"
+    local kver="${1}"
+    local variant="${2}"
     local dashvariant="${variant:+-${variant}}"
+    local kmod_package="kmod-${kmod_name}-${kver}${dashvariant}"
     case "$verrel" in
         *.el*) kdep="kernel${dashvariant}-%{_target_cpu} = ${verrel}" ;;
         *.EL*) kdep="kernel${dashvariant}-%{_target_cpu} = ${verrel}" ;;
         *)     kdep="kernel-%{_target_cpu} = ${verrel}${variant}"     ;;
     esac
 
-    echo "%package       -n kmod-${kmod_name}${dashvariant}"
+    echo "%package       -n ${kmod_package}"
 
     if [ -z "$kmp_provides_summary" ]; then
         echo "Summary:          ${kmod_name} kernel module(s)"
@@ -123,10 +125,10 @@ then
 fi
 
 cat <<EOF
-%description   -n kmod-${kmod_name}${dashvariant}
+%description   -n ${kmod_package}
 This package provides the ${kmod_name} kernel modules built for the Linux
 kernel ${verrel}${variant} for the %{_target_cpu} family of processors.
-%post          -n kmod-${kmod_name}${dashvariant}
+%post          -n ${kmod_package}
 if [ -e "/boot/System.map-${verrel}${variant}" ]; then
     /sbin/depmod -aeF "/boot/System.map-${verrel}${variant}" "${verrel}${variant}" > /dev/null || :
 fi
@@ -135,29 +137,29 @@ EOF
     if [ ! -z "$kmp" ]; then
         cat <<EOF
 
-#modules=( \$(rpm -ql kmod-${kmod_name}${dashvariant} | grep '\.ko$') )
+#modules=( \$(rpm -ql ${kmod_package} | grep '\.ko$') )
 modules=( \$(find /lib/modules/${verrel}${variant}/extra/${kmod_name} \
           | grep '\.ko$') )
 if [ -x "/sbin/weak-modules" ]; then
     printf '%s\n' "\${modules[@]}" \
     | /sbin/weak-modules --add-modules
 fi
-%preun         -n kmod-${kmod_name}${dashvariant}
-rpm -ql kmod-${kmod_name}${dashvariant} | grep '\.ko$' \
-    > /var/run/rpm-kmod-${kmod_name}${dashvariant}-modules
+%preun         -n ${kmod_package}
+rpm -ql ${kmod_package} | grep '\.ko$' \
+    > /var/run/rpm-${kmod_package}-modules
 EOF
         
     fi
     
     cat <<EOF
-%postun        -n kmod-${kmod_name}${dashvariant}
+%postun        -n ${kmod_package}
 /sbin/depmod -aF /boot/System.map-${verrel}${variant} ${verrel}${variant} &> /dev/null || :
 EOF
     
     if [ ! -z "$kmp" ]; then
         cat <<EOF
-modules=( \$(cat /var/run/rpm-kmod-${kmod_name}${dashvariant}-modules) )
-#rm /var/run/rpm-kmod-${kmod_name}${dashvariant}-modules
+modules=( \$(cat /var/run/rpm-${kmod_package}-modules) )
+#rm /var/run/rpm-${kmod_package}-modules
 if [ -x "/sbin/weak-modules" ]; then
     printf '%s\n' "\${modules[@]}" \
     | /sbin/weak-modules --remove-modules
@@ -165,12 +167,13 @@ fi
 EOF
     fi
 
-echo "%files         -n kmod-${kmod_name}${dashvariant}"
+echo "%files         -n ${kmod_package}"
 
 if [ "" == "$kmp_override_filelist" ];
 then
     echo "%defattr(644,root,root,755)"
     echo "/lib/modules/${verrel}${variant}/"
+    echo "%config /etc/depmod.d/kmod-${kmod_name}.conf"
     #BZ252188 - I've commented this out for the moment since RHEL5 doesn't
     #           really support external firmware e.g. at install time. If
     #           you really want it, use an override filelist solution.
@@ -201,9 +204,9 @@ print_rpmtemplate ()
   for variant in "$@" ; do
       if [ "default" == "$variant" ];
       then
-            get_rpmtemplate ""
+            get_rpmtemplate "${kver}" ""
       else
-            get_rpmtemplate "${variant}"
+            get_rpmtemplate "${kver}" "${variant}"
       fi
   done
 }
