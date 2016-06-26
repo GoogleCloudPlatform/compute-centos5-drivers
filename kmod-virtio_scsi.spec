@@ -54,7 +54,12 @@ echo "override %{kmod_name} * weak-updates/%{kmod_name}" > kmod-%{kmod_name}.con
 %build
 for kvariant in %{kvariants} ; do
     KSRC=%{_usrsrc}/kernels/%{kversion}${kvariant:+-$kvariant}-%{_target_cpu}
-    %{__make} -C "${KSRC}" %{?_smp_mflags} modules M=$PWD/_kmod_build_$kvariant
+    # Detect whether the underlying tree uses find_vq() or find_vqs():
+    USE_FIND_VQS=0
+    if grep -q find_vqs\( "${KSRC}"/include/linux/virtio_config.h ; then
+      USE_FIND_VQS=1
+    fi
+    %{__make} -C "${KSRC}" %{?_smp_mflags} modules USE_FIND_VQS="${USE_FIND_VQS}" M=$PWD/_kmod_build_$kvariant
 done
 
 %install

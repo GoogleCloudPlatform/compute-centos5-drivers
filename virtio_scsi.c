@@ -45,6 +45,10 @@ static inline void set_driver_byte(struct scsi_cmnd *cmd, char status)
 
 #define VIRTIO_ID_SCSI          8 /* virtio scsi */
 
+#ifndef USE_FIND_VQS
+#define USE_FIND_VQS 0
+#endif
+
 /* begin original driver */
 
 #define VIRTIO_SCSI_MEMPOOL_SZ 64
@@ -600,12 +604,16 @@ static void virtscsi_del_vqs(struct virtio_device *vdev)
 {
 	struct Scsi_Host *sh = virtio_scsi_host(vdev);
 	struct virtio_scsi *vscsi = shost_priv(sh);
+#if USE_FIND_VQS == 0
 	if (vscsi->ctrl_vq.vq)
 		vdev->config->del_vq(vscsi->ctrl_vq.vq);
 	if (vscsi->event_vq.vq)
 		vdev->config->del_vq(vscsi->event_vq.vq);
 	if (vscsi->req_vq.vq)
 		vdev->config->del_vq(vscsi->req_vq.vq);
+#else
+	vdev->config->del_vqs(vdev);
+#endif
 	vscsi->ctrl_vq.vq = NULL;
 	vscsi->event_vq.vq = NULL;
 	vscsi->req_vq.vq = NULL;
@@ -690,6 +698,7 @@ static int virtscsi_init(struct virtio_device *vdev,
 	virtscsi_downneg_queue(vdev, 1);
 	virtscsi_downneg_queue(vdev, 2);
 
+#if USE_FIND_VQS == 0
 	/* Discover virtqueues and write information to configuration.  */
 	vqs[0] = vdev->config->find_vq(vdev, 0, virtscsi_ctrl_done);
 	if (IS_ERR(vqs[0])) {
@@ -712,6 +721,24 @@ static int virtscsi_init(struct virtio_device *vdev,
 		err = PTR_ERR(vqs[2]);
 		goto out;
 	}
+#else
+	vq_callback_t *callbacks[] = {
+		virtscsi_ctrl_done,
+		virtscsi_event_done,
+		virtscsi_req_done
+	};
+	const char *names[] = {
+		"control",
+		"event",
+		"request"
+	};
+
+	/* Discover virtqueues and write information to configuration.  */
+	err = vdev->config->find_vqs(vdev, 3, vqs, callbacks, names);
+	if (err)
+		return err;
+#endif
+
 	virtscsi_init_vq(&vscsi->ctrl_vq, vqs[0]);
 	virtscsi_init_vq(&vscsi->event_vq, vqs[1]);
 	virtscsi_init_vq(&vscsi->req_vq, vqs[2]);
