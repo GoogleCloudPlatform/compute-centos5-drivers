@@ -3,6 +3,8 @@
 /* This header is BSD licensed so anyone can use the definitions to implement
  * compatible drivers/servers. */
 
+#define VIRTIO_SCSI_QUEUE_NUM_MAX 2048
+
 #define VIRTIO_SCSI_CDB_SIZE   32
 #define VIRTIO_SCSI_SENSE_SIZE 96
 

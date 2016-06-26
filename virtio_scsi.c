@@ -17,12 +17,35 @@
 #include <linux/slab.h>
 #include <linux/mempool.h>
 #include <linux/virtio.h>
-#include <linux/virtio_ids.h>
+#include <linux/virtio_pci.h>
 #include <linux/virtio_config.h>
-#include <linux/virtio_scsi.h>
+#include "virtio_scsi.h"
+#include <scsi/scsi.h>
 #include <scsi/scsi_host.h>
 #include <scsi/scsi_device.h>
 #include <scsi/scsi_cmnd.h>
+#include <scsi/fc_compat.h>  /* for_each_sg */
+
+/* unavailable in rhel5: */
+static inline void set_host_byte(struct scsi_cmnd *cmd, char status)
+{
+	cmd->result = (cmd->result & 0xff00ffff) | (status << 16);
+}
+
+static inline void set_driver_byte(struct scsi_cmnd *cmd, char status)
+{
+	cmd->result = (cmd->result & 0x00ffffff) | (status << 24);
+}
+
+#define sg_virt(sg) (void*)((unsigned long)(page_address(sg->page) + sg->offset))
+
+#define KMEM_CACHE(__struct, __flags) kmem_cache_create(#__struct,\
+		sizeof(struct __struct), __alignof__(struct __struct),\
+		(__flags), NULL)
+
+#define VIRTIO_ID_SCSI          8 /* virtio scsi */
+
+/* begin original driver */
 
 #define VIRTIO_SCSI_MEMPOOL_SZ 64
 #define VIRTIO_SCSI_EVENT_LEN 8
@@ -93,13 +116,7 @@ static void virtscsi_compute_resid(struct scsi_cmnd *sc, u32 resid)
 	if (!resid)
 		return;
 
-	if (!scsi_bidi_cmnd(sc)) {
-		scsi_set_resid(sc, resid);
-		return;
-	}
-
-	scsi_in(sc)->resid = min(resid, scsi_in(sc)->length);
-	scsi_out(sc)->resid = resid - scsi_in(sc)->resid;
+	scsi_set_resid(sc, resid);
 }
 
 /**
@@ -142,10 +159,10 @@ static void virtscsi_complete_cmd(void *buf)
 		set_host_byte(sc, DID_TRANSPORT_DISRUPTED);
 		break;
 	case VIRTIO_SCSI_S_TARGET_FAILURE:
-		set_host_byte(sc, DID_TARGET_FAILURE);
+		set_host_byte(sc, DID_RESET);
 		break;
 	case VIRTIO_SCSI_S_NEXUS_FAILURE:
-		set_host_byte(sc, DID_NEXUS_FAILURE);
+		set_host_byte(sc, DID_RESET);
 		break;
 	default:
 		scmd_printk(KERN_WARNING, sc, "Unknown response %d",
@@ -174,10 +191,10 @@ static void virtscsi_vq_done(struct virtqueue *vq, void (*fn)(void *buf))
 	unsigned int len;
 
 	do {
-		virtqueue_disable_cb(vq);
-		while ((buf = virtqueue_get_buf(vq, &len)) != NULL)
+		vq->vq_ops->disable_cb(vq);
+		while ((buf = vq->vq_ops->get_buf(vq, &len)) != NULL)
 			fn(buf);
-	} while (!virtqueue_enable_cb(vq));
+	} while (!vq->vq_ops->enable_cb(vq));
 }
 
 static void virtscsi_req_done(struct virtqueue *vq)
@@ -223,9 +240,10 @@ static int virtscsi_kick_event(struct virtio_scsi *vscsi,
 
 	spin_lock_irqsave(&vscsi->event_vq.vq_lock, flags);
 
-	ret = virtqueue_add_buf_gfp(vscsi->event_vq.vq, &sg, 0, 1, event_node, GFP_ATOMIC);
+	ret = vscsi->event_vq.vq->vq_ops->add_buf(
+		vscsi->event_vq.vq, &sg, 0, 1, event_node);
 	if (ret >= 0)
-		virtqueue_kick(vscsi->event_vq.vq);
+		vscsi->event_vq.vq->vq_ops->kick(vscsi->event_vq.vq);
 
 	spin_unlock_irqrestore(&vscsi->event_vq.vq_lock, flags);
 
@@ -246,10 +264,14 @@ static int virtscsi_kick_event_all(struct virtio_scsi *vscsi)
 
 static void virtscsi_cancel_event_work(struct virtio_scsi *vscsi)
 {
+	/*
+	 * RHEL5 doesn't support cancelling scheduled work.
+	 * As a consequence hotplug events are racy with module unload.
 	int i;
 
 	for (i = 0; i < VIRTIO_SCSI_EVENT_LEN; i++)
 		cancel_work_sync(&vscsi->event_list[i].work);
+	 */
 }
 
 static void virtscsi_handle_transport_reset(struct virtio_scsi *vscsi,
@@ -270,7 +292,7 @@ static void virtscsi_handle_transport_reset(struct virtio_scsi *vscsi,
 			scsi_remove_device(sdev);
 			scsi_device_put(sdev);
 		} else {
-			pr_err("SCSI device %d 0 %d %d not found\n",
+			printk(KERN_ERR "SCSI device %d 0 %d %d not found\n",
 				shost->host_no, target, lun);
 		}
 		break;
@@ -279,8 +301,9 @@ static void virtscsi_handle_transport_reset(struct virtio_scsi *vscsi,
 	}
 }
 
-static void virtscsi_handle_event(struct work_struct *work)
+static void virtscsi_handle_event(void *_work)
 {
+	struct work_struct *work = _work;
 	struct virtio_scsi_event_node *event_node =
 		container_of(work, struct virtio_scsi_event_node, work);
 	struct virtio_scsi *vscsi = event_node->vscsi;
@@ -298,7 +321,7 @@ static void virtscsi_handle_event(struct work_struct *work)
 		virtscsi_handle_transport_reset(vscsi, event);
 		break;
 	default:
-		pr_err("Unsupport virtio scsi event %x\n", event->event);
+		printk(KERN_ERR "Unsupport virtio scsi event %x\n", event->event);
 	}
 	virtscsi_kick_event(vscsi, event_node);
 }
@@ -323,14 +346,14 @@ static void virtscsi_event_done(struct virtqueue *vq)
 };
 
 static void virtscsi_map_sgl(struct scatterlist *sg, unsigned int *p_idx,
-			     struct scsi_data_buffer *sdb)
+			     struct scsi_cmnd *sc)
 {
-	struct sg_table *table = &sdb->table;
+	struct scatterlist *sgl = sc->request_buffer;
 	struct scatterlist *sg_elem;
 	unsigned int idx = *p_idx;
 	int i;
 
-	for_each_sg(table->sgl, sg_elem, table->nents, i)
+	for_each_sg(sgl, sg_elem, sc->use_sg, i)
 		sg_set_buf(&sg[idx++], sg_virt(sg_elem), sg_elem->length);
 
 	*p_idx = idx;
@@ -361,7 +384,7 @@ static void virtscsi_map_cmd(struct virtio_scsi_target_state *tgt,
 
 	/* Data-out buffer.  */
 	if (sc && sc->sc_data_direction != DMA_FROM_DEVICE)
-		virtscsi_map_sgl(sg, &idx, scsi_out(sc));
+		virtscsi_map_sgl(sg, &idx, sc);
 
 	*out_num = idx;
 
@@ -370,7 +393,7 @@ static void virtscsi_map_cmd(struct virtio_scsi_target_state *tgt,
 
 	/* Data-in buffer */
 	if (sc && sc->sc_data_direction != DMA_TO_DEVICE)
-		virtscsi_map_sgl(sg, &idx, scsi_in(sc));
+		virtscsi_map_sgl(sg, &idx, sc);
 
 	*in_num = idx - *out_num;
 }
@@ -388,26 +411,26 @@ static int virtscsi_kick_cmd(struct virtio_scsi_target_state *tgt,
 	virtscsi_map_cmd(tgt, cmd, &out_num, &in_num, req_size, resp_size);
 
 	spin_lock(&vq->vq_lock);
-	ret = virtqueue_add_buf_gfp(vq->vq, tgt->sg, out_num, in_num, cmd, gfp);
+	ret = vq->vq->vq_ops->add_buf(vq->vq, tgt->sg, out_num, in_num, cmd);
 	spin_unlock(&tgt->tgt_lock);
+	/* XXX consider replacing this with a "prepare" version. */
 	if (ret >= 0)
-		ret = virtqueue_kick_prepare(vq->vq);
-
+		vq->vq->vq_ops->kick(vq->vq);
 	spin_unlock_irqrestore(&vq->vq_lock, flags);
-
-	if (ret > 0)
-		virtqueue_notify(vq->vq);
 	return ret;
 }
 
-static int virtscsi_queuecommand(struct Scsi_Host *sh, struct scsi_cmnd *sc)
+static int virtscsi_queuecommand(struct scsi_cmnd *sc, void(*done)(struct scsi_cmnd *))
 {
-	struct virtio_scsi *vscsi = shost_priv(sh);
+	struct Scsi_Host *shost = sc->device->host;
+	struct virtio_scsi *vscsi = shost_priv(shost);
 	struct virtio_scsi_target_state *tgt = vscsi->tgt[sc->device->id];
 	struct virtio_scsi_cmd *cmd;
 	int ret;
 
-	struct Scsi_Host *shost = virtio_scsi_host(vscsi->vdev);
+	sc->scsi_done = done;
+
+	BUG_ON(shost != virtio_scsi_host(vscsi->vdev));
 	BUG_ON(scsi_sg_count(sc) > shost->sg_tablesize);
 
 	/* TODO: check feature bit and fail if unsupported?  */
@@ -569,8 +592,23 @@ static struct virtio_scsi_target_state *virtscsi_alloc_tgt(
 		return NULL;
 
 	spin_lock_init(&tgt->tgt_lock);
-	sg_init_table(tgt->sg, sg_elems + 2);
+	memset(tgt->sg, 0, sizeof(*tgt->sg) * (sg_elems + 2));
 	return tgt;
+}
+
+static void virtscsi_del_vqs(struct virtio_device *vdev)
+{
+	struct Scsi_Host *sh = virtio_scsi_host(vdev);
+	struct virtio_scsi *vscsi = shost_priv(sh);
+	if (vscsi->ctrl_vq.vq)
+		vdev->config->del_vq(vscsi->ctrl_vq.vq);
+	if (vscsi->event_vq.vq)
+		vdev->config->del_vq(vscsi->event_vq.vq);
+	if (vscsi->req_vq.vq)
+		vdev->config->del_vq(vscsi->req_vq.vq);
+	vscsi->ctrl_vq.vq = NULL;
+	vscsi->event_vq.vq = NULL;
+	vscsi->req_vq.vq = NULL;
 }
 
 static void virtscsi_remove_vqs(struct virtio_device *vdev)
@@ -588,7 +626,57 @@ static void virtscsi_remove_vqs(struct virtio_device *vdev)
 		vscsi->tgt[i] = NULL;
 	}
 
-	vdev->config->del_vqs(vdev);
+	virtscsi_del_vqs(vdev);
+}
+
+/* Internal structure mirrrored here so we can access the ioaddr */
+struct virtio_pci_device
+{
+	struct virtio_device vdev;
+	struct pci_dev *pci_dev;
+
+	/* the IO mapping for the PCI config space */
+	void __iomem *ioaddr;
+
+	/* a list of queues so we can dispatch IRQs */
+	spinlock_t lock;
+	struct list_head virtqueues;
+};
+
+/* Convert a generic virtio device to a virtio_pci_device */
+static struct virtio_pci_device *to_vp_device(struct virtio_device *vdev)
+{
+	return container_of(vdev, struct virtio_pci_device, vdev);
+}
+
+/*
+ * RHEL5 kernels aren't capable of allocating vring_new_virtqueue() with GCE's
+ * default queue sizes, which results in failed probes due to ENOMEM.
+ * Instead, we down negotiate the queue size to workaround.
+ */
+static void virtscsi_downneg_queue(struct virtio_device *vdev, unsigned index)
+{
+	/* XXX: following code assumes this is a PCI device! */
+	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
+	u16 num;
+
+	/* Select the queue we're interested in */
+	iowrite16(index, vp_dev->ioaddr + VIRTIO_PCI_QUEUE_SEL);
+
+	/* Check if queue is either not available or already active. */
+	num = ioread16(vp_dev->ioaddr + VIRTIO_PCI_QUEUE_NUM);
+
+	if (num > VIRTIO_SCSI_QUEUE_NUM_MAX) {
+		num = VIRTIO_SCSI_QUEUE_NUM_MAX;
+		/*
+		 * Renegotiating queue sizes isn't actually supported in Virtio
+		 * 0.9.5, however it is supported in Google Compute Engine and
+		 * should also be supported by all virtio 1.0 devices (which
+		 * this driver is not yet transitioned to).
+		 */
+		iowrite16(num, vp_dev->ioaddr + VIRTIO_PCI_QUEUE_NUM);
+		printk(KERN_DEBUG "virtio_scsi: down negotiated queue index %u to %d\n", index, num);
+	}
 }
 
 static int virtscsi_init(struct virtio_device *vdev,
@@ -598,22 +686,32 @@ static int virtscsi_init(struct virtio_device *vdev,
 	struct virtqueue *vqs[3];
 	u32 i, sg_elems;
 
-	vq_callback_t *callbacks[] = {
-		virtscsi_ctrl_done,
-		virtscsi_event_done,
-		virtscsi_req_done
-	};
-	const char *names[] = {
-		"control",
-		"event",
-		"request"
-	};
+	virtscsi_downneg_queue(vdev, 0);
+	virtscsi_downneg_queue(vdev, 1);
+	virtscsi_downneg_queue(vdev, 2);
 
 	/* Discover virtqueues and write information to configuration.  */
-	err = vdev->config->find_vqs(vdev, 3, vqs, callbacks, names);
-	if (err)
-		return err;
-
+	vqs[0] = vdev->config->find_vq(vdev, 0, virtscsi_ctrl_done);
+	if (IS_ERR(vqs[0])) {
+		printk(KERN_INFO "virtscsi ctrl queue failed errno %ld\n", PTR_ERR(vqs[0]));
+		err = PTR_ERR(vqs[0]);
+		goto out;
+	}
+	vqs[1] = vdev->config->find_vq(vdev, 1, virtscsi_event_done);
+	if (IS_ERR(vqs[1])) {
+		vdev->config->del_vq(vqs[0]);
+		printk(KERN_INFO "virtscsi event queue failed errno %ld\n", PTR_ERR(vqs[1]));
+		err = PTR_ERR(vqs[1]);
+		goto out;
+	}
+	vqs[2] = vdev->config->find_vq(vdev, 2, virtscsi_req_done);
+	if (IS_ERR(vqs[2])) {
+		vdev->config->del_vq(vqs[0]);
+		vdev->config->del_vq(vqs[1]);
+		printk(KERN_INFO "virtscsi request queue failed errno %ld\n", PTR_ERR(vqs[2]));
+		err = PTR_ERR(vqs[2]);
+		goto out;
+	}
 	virtscsi_init_vq(&vscsi->ctrl_vq, vqs[0]);
 	virtscsi_init_vq(&vscsi->event_vq, vqs[1]);
 	virtscsi_init_vq(&vscsi->req_vq, vqs[2]);
@@ -685,7 +783,7 @@ static int __devinit virtscsi_probe(struct virtio_device *vdev)
 	return 0;
 
 scsi_add_host_failed:
-	vdev->config->del_vqs(vdev);
+	virtscsi_del_vqs(vdev);
 virtscsi_init_failed:
 	scsi_host_put(shost);
 	return err;
@@ -705,6 +803,7 @@ static void __devexit virtscsi_remove(struct virtio_device *vdev)
 	scsi_host_put(shost);
 }
 
+/* virtio CONFIG_PM support not present in RHEL5:
 #ifdef CONFIG_PM
 static int virtscsi_freeze(struct virtio_device *vdev)
 {
@@ -720,6 +819,7 @@ static int virtscsi_restore(struct virtio_device *vdev)
 	return virtscsi_init(vdev, vscsi, sh->max_id);
 }
 #endif
+*/
 
 static struct virtio_device_id id_table[] = {
 	{ VIRTIO_ID_SCSI, VIRTIO_DEV_ANY_ID },
@@ -737,10 +837,12 @@ static struct virtio_driver virtio_scsi_driver = {
 	.driver.owner = THIS_MODULE,
 	.id_table = id_table,
 	.probe = virtscsi_probe,
+/* virtio CONFIG_PM support not present in RHEL5:
 #ifdef CONFIG_PM
 	.freeze = virtscsi_freeze,
 	.restore = virtscsi_restore,
 #endif
+*/
 	.remove = __devexit_p(virtscsi_remove),
 };
 
