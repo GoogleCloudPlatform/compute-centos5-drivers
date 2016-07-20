@@ -1,0 +1,9 @@
+URL: https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/
+Version: 3.3
+License: GPLv2
+License File: LICENSE
+Description:
+Device driver for virto_scsi from the Linux kernel.  Originally from 3.3 kernel sources.
+Local Modifications:
+- Originally backported to 2.6.39 kernels for use in Compute Engine.
+- Later backported to the 2.6.18 EL5 kernel.

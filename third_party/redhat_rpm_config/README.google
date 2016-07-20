@@ -1,0 +1,9 @@
+URL: redhat-rpm-config-8.0.45-32.el5.noarch.rpm
+Version: 8.0.45-32.el5
+License: GPL
+License File: LICENSE
+Description:
+kmodtool is the spec generating script used for creating kernel driver module
+packages on redhat.
+Local Modifications:
+- Adapted for virtio_scsi package.

@@ -1,0 +1,9 @@
+URL: https://wiki.centos.org/HowTos/BuildingKernelModules
+Version: 2016/7/7
+License: CC BY-SA 3.0
+License File: LICENSE
+Description:
+This is an example spec file used used for generating rpm packages for kernel
+modules.
+Local Modifications:
+- Adapted to build the virtio_scsi device driver.
