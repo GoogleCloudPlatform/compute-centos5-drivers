@@ -79,6 +79,8 @@ find %{buildroot} -type f -name \*.ko -exec %{__chmod} u+x \{\} \;
 %{__rm} -rf %{buildroot}
 
 %changelog
+* Thu Jul 14 2016 Mike Waychison <mikew@google.com> - 1.2-2
+- Added README.md and LICENSE to package.
 * Thu Jul 14 2016 Mike Waychison <mikew@google.com> - 1.2
 - Updated to use DID_RESET for SCSI failure modes not yet supported in RHEL5.
 * Sat Jun 25 2016 Mike Waychison <mikew@google.com> - 1.1

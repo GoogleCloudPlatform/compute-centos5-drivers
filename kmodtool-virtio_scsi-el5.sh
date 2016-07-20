@@ -174,6 +174,8 @@ then
     echo "%defattr(644,root,root,755)"
     echo "/lib/modules/${verrel}${variant}/"
     echo "%config /etc/depmod.d/kmod-${kmod_name}.conf"
+    echo "%doc %{kmod_name}-%{version}/LICENSE"
+    echo "%doc %{kmod_name}-%{version}/README.md"
     #BZ252188 - I've commented this out for the moment since RHEL5 doesn't
     #           really support external firmware e.g. at install time. If
     #           you really want it, use an override filelist solution.

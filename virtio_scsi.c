@@ -9,7 +9,7 @@
  *  Paolo Bonzini   <pbonzini@redhat.com>
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
- * See the COPYING file in the top-level directory.
+ * See the LICENSE file in the top-level directory.
  *
  */
 

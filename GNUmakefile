@@ -1,5 +1,5 @@
 DRIVER=virtio_scsi
-SOURCES=Makefile virtio_scsi.c virtio_scsi.h
+SOURCES=Makefile virtio_scsi.c virtio_scsi.h LICENSE README.md
 KMODTOOL=kmodtool-virtio_scsi-el5.sh
 SPEC=kmod-virtio_scsi.spec
 
